@@ -442,10 +442,10 @@ with tab_scr:
             cols = st.columns(n)
             ranks = ["#1", "#2", "#3"]
             for col, r, rank in zip(cols, top, ranks):
-                pe_s  = f"{r.pe_forward:.1f}×"          if r.pe_forward      is not None else "—"
-                rg_s  = f"{r.revenue_growth*100:+.1f}%"  if r.revenue_growth  is not None else "—"
-                eg_s  = f"{r.earnings_growth*100:+.1f}%" if r.earnings_growth is not None else "—"
-                w52_s = f"{r.week52_chg*100:+.1f}%"      if r.week52_chg      is not None else "—"
+                pe_s  = f"{r.pe_forward:.1f}×"        if r.pe_forward  is not None else "—"
+                rg_s  = f"{r.eps_growth*100:+.1f}%"   if r.eps_growth  is not None else "—"
+                eg_s  = f"{r.vs_ma200*100:+.1f}%"     if r.vs_ma200    is not None else "—"
+                w52_s = f"{r.week52_chg*100:+.1f}%"   if r.week52_chg  is not None else "—"
                 bar_w = min(100, max(0, r.score))
                 name_s = r.name[:34] + "…" if len(r.name) > 34 else r.name
 
@@ -465,11 +465,11 @@ with tab_scr:
   </div>
   <div class="pick-stats">
     <div class="pick-stat">
-      <div class="pick-stat-label">Rev Growth</div>
+      <div class="pick-stat-label">EPS Growth</div>
       <div class="pick-stat-val">{rg_s}</div>
     </div>
     <div class="pick-stat">
-      <div class="pick-stat-label">EPS Growth</div>
+      <div class="pick-stat-label">vs 200MA</div>
       <div class="pick-stat-val">{eg_s}</div>
     </div>
     <div class="pick-stat">

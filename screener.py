@@ -1,223 +1,305 @@
-"""Stock screener — parallel-fetch a curated universe and rank by composite score."""
+"""Market screener — Yahoo Finance predefined screeners, two buckets.
+
+HIGH RISK / HIGH REWARD  — aggressive small/mid cap growth names
+SAFE & SOLID             — large cap quality at reasonable valuation
+
+Field quirks from Yahoo Finance API (discovered empirically):
+  regularMarketChangePercent   → PERCENTAGE  (14.9  = +14.9%)
+  fiftyTwoWeekChangePercent    → PERCENTAGE  (-48.5 = -48.5%)
+  fiftyTwoWeekHighChangePercent   → FRACTION  (-0.63 = -63%)
+  twoHundredDayAverageChangePercent → FRACTION (-0.44 = -44%)
+We normalise everything to fractions internally.
+"""
 from __future__ import annotations
 
 import concurrent.futures
 from dataclasses import dataclass
-from typing import Callable
+from typing import Optional
 
-from data import Snapshot, fetch_snapshot
+import requests
 
-# ── Universe ──────────────────────────────────────────────────────────────────
-UNIVERSE: list[tuple[str, str]] = [
-    # AI / Cloud
-    ("NVDA", "AI Chips"),
-    ("MSFT", "Cloud / AI"),
-    ("GOOGL", "Search / Cloud"),
-    ("META", "Social / AI"),
-    ("AMZN", "Cloud / E-comm"),
-    # Consumer Tech
-    ("AAPL", "Consumer Tech"),
-    # Cybersecurity / Data
-    ("CRWD", "Cybersecurity"),
-    ("PLTR", "Data / AI"),
-    ("AXON", "Public Safety"),
-    # Semiconductors
-    ("AVGO", "Semiconductors"),
-    ("TSM", "Chip Mfg"),
-    # Payments / Financials
-    ("V", "Payments"),
-    ("MA", "Payments"),
-    ("JPM", "Banking"),
-    # Healthcare / Pharma
-    ("LLY", "GLP-1 Pharma"),
-    ("NVO", "GLP-1 Pharma"),
-    ("UNH", "Managed Care"),
-    # Consumer / Other
-    ("COST", "Warehouse Retail"),
-    ("SPGI", "Financial Data"),
-]
+_UA      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+_TIMEOUT = 18
 
+
+# ── Data model ─────────────────────────────────────────────────────────────────
 
 @dataclass
-class ScreenResult:
-    ticker: str
-    label: str
-    snap: Snapshot
-    score: float
-    quality: float      # 0–40
-    momentum: float     # 0–35
-    value_score: float  # 0–25
-    error: str | None = None
+class QuoteRow:
+    symbol:       str
+    name:         str
+    category:     str               # "high_risk" | "safe"
+    market_cap:   Optional[float]   = None
+    price:        Optional[float]   = None
+    day_chg:      Optional[float]   = None   # fraction  (+0.05 = +5%)
+    week52_chg:   Optional[float]   = None   # fraction  (+0.50 = +50%)
+    vs_ma200:     Optional[float]   = None   # fraction  (+0.10 = 10% above 200d MA)
+    pe_forward:   Optional[float]   = None
+    pe_trailing:  Optional[float]   = None
+    eps_growth:   Optional[float]   = None   # implied (fwd EPS - TTM EPS) / |TTM EPS|
+    score:        float             = 0.0
 
 
-def _score(snap: Snapshot) -> tuple[float, float, float, float]:
-    """Returns (total, quality, momentum, value_score)."""
-    # ── Quality (0–40): profitable growth ──────────────────────────────────
-    q = 0.0
-    if snap.revenue_growth_yoy is not None:
-        # 20 %+ growth → full 20 pts
-        q += min(20.0, max(0.0, snap.revenue_growth_yoy * 100))
-    if snap.ebitda_margin is not None:
-        # 25 %+ margin → full 20 pts
-        q += min(20.0, max(0.0, snap.ebitda_margin * 80))
+# ── Fetch helpers ──────────────────────────────────────────────────────────────
 
-    # ── Momentum / Technical (0–35) ────────────────────────────────────────
-    t = 0.0
-    rsi = snap.rsi_14
-    if rsi is not None:
-        if 50 <= rsi <= 65:
-            t += 20.0   # sweet spot: trending but not extended
-        elif 40 <= rsi < 50:
-            t += 14.0
-        elif 65 < rsi <= 72:
-            t += 12.0
-        elif 30 <= rsi < 40:
-            t += 6.0
-        # RSI < 30 or > 72 → 0 pts
-    if snap.above_ma_200:
-        t += 10.0
-    if snap.above_ma_50:
-        t += 5.0
-
-    # ── Value (0–25): inverse forward P/E ──────────────────────────────────
-    v = 0.0
-    if snap.pe_forward is not None and 0 < snap.pe_forward < 300:
-        v = max(0.0, min(25.0, 500.0 / snap.pe_forward))   # 20× PE → 25 pts
-
-    total = round(q + t + v, 1)
-    return total, round(q, 1), round(t, 1), round(v, 1)
+def _get_predefined(scr_id: str, count: int = 100) -> list[dict]:
+    url    = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
+    params = {
+        "scrIds":    scr_id,
+        "start":     0,
+        "count":     count,
+        "formatted": "false",
+        "lang":      "en-US",
+        "region":    "US",
+    }
+    try:
+        r = requests.get(
+            url, params=params,
+            headers={"User-Agent": _UA, "Accept": "application/json"},
+            timeout=_TIMEOUT,
+        )
+        r.raise_for_status()
+        result = r.json().get("finance", {}).get("result") or []
+        return result[0].get("quotes", []) if result else []
+    except Exception:
+        return []
 
 
-def _dummy_snap(ticker: str) -> Snapshot:
-    return Snapshot(
-        ticker=ticker, name=None, sector=None, industry=None,
-        price=None, market_cap=None, pe_ttm=None, pe_forward=None,
-        ev_ebitda=None, p_fcf=None, revenue_growth_yoy=None,
-        ebitda_margin=None, net_debt_to_ebitda=None, short_pct_float=None,
-        rsi_14=None, ma_50=None, ma_200=None, vs_ma_200_pct=None,
-        above_ma_50=None, above_ma_200=None, week52_high=None, week52_low=None,
+def _parse(q: dict, category: str) -> QuoteRow:
+    # Implied forward EPS growth
+    eps_fwd = q.get("epsForward")
+    eps_ttm = q.get("epsTrailingTwelveMonths")
+    eps_growth: Optional[float] = None
+    if eps_fwd is not None and eps_ttm is not None and eps_ttm > 0:
+        eps_growth = (eps_fwd - eps_ttm) / eps_ttm
+
+    # 52w change is stored as PERCENTAGE → convert to fraction
+    w52_pct = q.get("fiftyTwoWeekChangePercent")
+    week52  = w52_pct / 100.0 if w52_pct is not None else None
+
+    # Day change is PERCENTAGE → fraction
+    day_pct = q.get("regularMarketChangePercent")
+    day_chg = day_pct / 100.0 if day_pct is not None else None
+
+    # vs 200d MA is already a FRACTION
+    vs_ma200 = q.get("twoHundredDayAverageChangePercent")
+
+    return QuoteRow(
+        symbol      = q.get("symbol", ""),
+        name        = (q.get("longName") or q.get("shortName") or q.get("symbol", ""))[:44],
+        category    = category,
+        market_cap  = q.get("marketCap"),
+        price       = q.get("regularMarketPrice"),
+        day_chg     = day_chg,
+        week52_chg  = week52,
+        vs_ma200    = vs_ma200,
+        pe_forward  = q.get("forwardPE"),
+        pe_trailing = q.get("trailingPE"),
+        eps_growth  = eps_growth,
     )
 
 
-def screen_universe(
-    progress_cb: Callable[[float], None] | None = None,
-) -> list[ScreenResult]:
-    """Fetch all tickers concurrently, score, return sorted descending by score."""
-    results: list[ScreenResult] = []
+# ── Scoring ────────────────────────────────────────────────────────────────────
 
-    def _fetch_one(item: tuple[str, str]) -> ScreenResult:
-        ticker, label = item
-        try:
-            snap, _ = fetch_snapshot(ticker)
-            total, q, t, v = _score(snap)
-            return ScreenResult(
-                ticker=ticker, label=label, snap=snap,
-                score=total, quality=q, momentum=t, value_score=v,
-            )
-        except Exception as exc:
-            return ScreenResult(
-                ticker=ticker, label=label, snap=_dummy_snap(ticker),
-                score=0.0, quality=0.0, momentum=0.0, value_score=0.0,
-                error=str(exc),
-            )
+def _score_hr(r: QuoteRow) -> float:
+    """High Risk: 52w momentum + implied EPS growth + day momentum."""
+    s = 0.0
+    # 52-week price momentum (0–50 pts) — rewarded above 0
+    if r.week52_chg is not None and r.week52_chg > 0:
+        s += min(50.0, r.week52_chg * 100)          # +50% 52w → 50 pts
+    # Implied EPS growth (0–35 pts)
+    if r.eps_growth is not None and r.eps_growth > 0:
+        s += min(35.0, r.eps_growth * 70)            # +50% EPS grw → 35 pts
+    # Today's momentum (0–15 pts) — volatile movers score higher
+    if r.day_chg is not None and r.day_chg > 0:
+        s += min(15.0, r.day_chg * 150)              # +10% day → 15 pts
+    return round(s, 1)
 
+
+def _score_safe(r: QuoteRow) -> float:
+    """Safe: forward value + MA trend + 52w momentum."""
+    s = 0.0
+    # Forward P/E value (0–40 pts) — lower is better
+    if r.pe_forward is not None and 0 < r.pe_forward < 100:
+        s += max(0.0, min(40.0, 800.0 / r.pe_forward))   # PE 20 → 40 pts
+    # Above 200d MA (0–30 pts)
+    if r.vs_ma200 is not None and r.vs_ma200 > 0:
+        s += min(30.0, r.vs_ma200 * 150)                  # +20% above → 30 pts
+    # 52-week positive momentum (0–30 pts)
+    if r.week52_chg is not None and r.week52_chg > 0:
+        s += min(30.0, r.week52_chg * 60)                 # +50% 52w → 30 pts
+    return round(s, 1)
+
+
+# ── Main entry point ───────────────────────────────────────────────────────────
+
+def run_screen(
+    progress_cb=None,
+) -> tuple[list[QuoteRow], list[QuoteRow]]:
+    """Fetch and return (high_risk_rows, safe_rows), both sorted by score desc."""
+    tasks = {
+        "hr1": ("aggressive_small_caps",   100, "high_risk"),
+        "hr2": ("growth_technology_stocks", 60, "high_risk"),
+        "sf1": ("undervalued_large_caps",  100, "safe"),
+        "sf2": ("undervalued_growth_stocks", 60, "safe"),
+    }
+    raw: dict[str, list[dict]] = {}
     done = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {pool.submit(_fetch_one, item): item for item in UNIVERSE}
+
+    def _fetch(key: str, scr_id: str, count: int, _cat: str):
+        return key, _get_predefined(scr_id, count)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {
+            pool.submit(_fetch, k, sid, cnt, cat): k
+            for k, (sid, cnt, cat) in tasks.items()
+        }
         for fut in concurrent.futures.as_completed(futures):
-            results.append(fut.result())
+            key, quotes = fut.result()
+            raw[key] = quotes
             done += 1
             if progress_cb:
-                progress_cb(done / len(UNIVERSE))
+                progress_cb(done / len(tasks))
 
-    return sorted(results, key=lambda r: r.score, reverse=True)
+    def _merge(keys: list[str], category: str) -> list[QuoteRow]:
+        seen: set[str] = set()
+        rows: list[QuoteRow] = []
+        for k in keys:
+            for q in raw.get(k, []):
+                sym = q.get("symbol", "")
+                if sym and sym not in seen:
+                    seen.add(sym)
+                    rows.append(_parse(q, category))
+        return rows
+
+    hr_rows   = _merge(["hr1", "hr2"], "high_risk")
+    safe_rows = _merge(["sf1", "sf2"], "safe")
+
+    for r in hr_rows:
+        r.score = _score_hr(r)
+    for r in safe_rows:
+        r.score = _score_safe(r)
+
+    hr_rows.sort(  key=lambda x: x.score, reverse=True)
+    safe_rows.sort(key=lambda x: x.score, reverse=True)
+
+    return hr_rows, safe_rows
 
 
-# ── Table HTML renderer ────────────────────────────────────────────────────────
+# ── Formatting helpers ─────────────────────────────────────────────────────────
+
+def _mc(v: Optional[float]) -> str:
+    if v is None:
+        return "—"
+    if v >= 1e12:
+        return f"${v/1e12:.1f}T"
+    if v >= 1e9:
+        return f"${v/1e9:.1f}B"
+    if v >= 1e6:
+        return f"${v/1e6:.0f}M"
+    return f"${v:,.0f}"
+
+
+def _pct(v: Optional[float]) -> str:
+    """Render a fraction as a coloured percentage string."""
+    if v is None:
+        return "—"
+    return f"{'+'if v >= 0 else ''}{v*100:.1f}%"
+
+
+def _pe(v: Optional[float]) -> str:
+    return "—" if (v is None or v <= 0) else f"{v:.1f}×"
+
+
+def _score_bar(score: float, accent: str) -> str:
+    pct = min(100, max(0, score))
+    return (
+        f'<div style="display:flex;align-items:center;gap:7px">'
+        f'<div style="width:48px;height:4px;background:#1e2330;border-radius:3px;flex-shrink:0">'
+        f'<div style="width:{pct:.0f}%;height:4px;background:{accent};border-radius:3px"></div>'
+        f'</div>'
+        f'<span style="font-family:\'JetBrains Mono\',monospace;font-size:0.82rem;'
+        f'color:{accent};font-weight:700">{score:.0f}</span>'
+        f'</div>'
+    )
+
 
 def _cls(val, lo: float, hi: float, invert: bool = False) -> str:
-    """Map a value onto cell-green / cell-amber / cell-red."""
     if val is None:
         return "cell-dim"
     norm = (val - lo) / max(hi - lo, 1e-9)
     norm = max(0.0, min(1.0, norm))
     if invert:
         norm = 1.0 - norm
-    if norm >= 0.65:
+    if norm >= 0.62:
         return "cell-green"
     if norm >= 0.35:
         return "cell-amber"
     return "cell-red"
 
 
-def _rsi_cls(rsi) -> str:
-    if rsi is None:
-        return "cell-dim"
-    if 48 <= rsi <= 68:
-        return "cell-green"
-    if 38 <= rsi <= 78:
-        return "cell-amber"
-    return "cell-red"
+# ── HTML table ─────────────────────────────────────────────────────────────────
 
+def render_table(rows: list[QuoteRow], accent: str, limit: int = 50) -> str:
+    is_hr = rows and rows[0].category == "high_risk"
+    html_rows = []
+    for rank, r in enumerate(rows[:limit], 1):
+        day_cls  = _cls(r.day_chg,   lo=-0.03, hi=0.08)
+        w52_cls  = _cls(r.week52_chg, lo=-0.20, hi=0.80)
+        eps_cls  = _cls(r.eps_growth, lo=-0.10, hi=0.50)
+        pe_cls   = _cls(r.pe_forward, lo=5, hi=50, invert=True)
+        ma_cls   = _cls(r.vs_ma200,  lo=-0.15, hi=0.30)
 
-def render_table(results: list[ScreenResult]) -> str:
-    """Return a styled HTML table for use in st.markdown(unsafe_allow_html=True)."""
-    rows = []
-    rank = 0
-    for r in results:
-        if r.error:
-            continue
-        rank += 1
-        s = r.snap
+        price_s  = f"${r.price:,.2f}" if r.price else "—"
+        day_s    = _pct(r.day_chg)
+        w52_s    = _pct(r.week52_chg)
+        eps_s    = _pct(r.eps_growth)
+        pe_s     = _pe(r.pe_forward)
+        ma_s     = _pct(r.vs_ma200)
+        mc_s     = _mc(r.market_cap)
+        sc_bar   = _score_bar(r.score, accent)
+        name_s   = r.name[:34] + "…" if len(r.name) > 34 else r.name
 
-        def _p(v, mult=100, plus=True, suffix="%"):
-            if v is None:
-                return "—"
-            return f"{'+' if plus and v > 0 else ''}{v * mult:.1f}{suffix}"
+        pe_cell  = "" if is_hr else f'<td class="{pe_cls}" style="text-align:right;font-family:\'JetBrains Mono\',monospace;white-space:nowrap">{pe_s}</td>'
+        ma_cell  = "" if is_hr else f'<td class="{ma_cls}" style="text-align:right;font-family:\'JetBrains Mono\',monospace;white-space:nowrap">{ma_s}</td>'
 
-        def _f(v, fmt=".1f", suffix=""):
-            return "—" if v is None else f"{v:{fmt}}{suffix}"
-
-        pe_str   = f"{s.pe_forward:.1f}×" if s.pe_forward else "—"
-        rg_str   = _p(s.revenue_growth_yoy)
-        em_str   = _p(s.ebitda_margin, plus=False)
-        rsi_str  = _f(s.rsi_14)
-        ma_str   = f"{s.vs_ma_200_pct:+.1f}%" if s.vs_ma_200_pct is not None else "—"
-
-        sc_cls  = _cls(r.score,                  lo=30, hi=80)
-        pe_cls  = _cls(s.pe_forward,              lo=10, hi=60, invert=True)
-        rg_cls  = _cls(s.revenue_growth_yoy,      lo=-0.05, hi=0.30)
-        em_cls  = _cls(s.ebitda_margin,            lo=0.0,  hi=0.30)
-        rs_cls  = _rsi_cls(s.rsi_14)
-        ma_cls  = _cls(s.vs_ma_200_pct,           lo=-15,  hi=30)
-
-        rows.append(f"""
+        html_rows.append(f"""
 <tr>
-  <td style="color:#4b5563;text-align:center;width:36px">{rank}</td>
-  <td style="font-family:'JetBrains Mono',monospace;font-weight:700;color:#f4f5f7;white-space:nowrap">{r.ticker}</td>
-  <td style="color:#9ca3af;font-size:0.82rem;white-space:nowrap">{r.label}</td>
-  <td class="{sc_cls}" style="text-align:center;font-weight:700;font-family:'JetBrains Mono',monospace">{r.score:.0f}</td>
-  <td class="{pe_cls}" style="text-align:right;font-family:'JetBrains Mono',monospace">{pe_str}</td>
-  <td class="{rg_cls}" style="text-align:right;font-family:'JetBrains Mono',monospace">{rg_str}</td>
-  <td class="{em_cls}" style="text-align:right;font-family:'JetBrains Mono',monospace">{em_str}</td>
-  <td class="{rs_cls}" style="text-align:right;font-family:'JetBrains Mono',monospace">{rsi_str}</td>
-  <td class="{ma_cls}" style="text-align:right;font-family:'JetBrains Mono',monospace">{ma_str}</td>
+  <td style="color:#374151;text-align:center;width:28px;font-size:0.78rem">{rank}</td>
+  <td style="min-width:120px">
+    <div style="font-family:'JetBrains Mono',monospace;font-weight:700;color:#f4f5f7;font-size:0.9rem;letter-spacing:-0.01em">{r.symbol}</div>
+    <div style="color:#4b5563;font-size:0.73rem;margin-top:1px">{name_s}</div>
+  </td>
+  <td style="color:#6b7280;font-size:0.82rem;white-space:nowrap">{mc_s}</td>
+  <td style="white-space:nowrap">
+    <div style="font-family:'JetBrains Mono',monospace;font-size:0.86rem;color:#d1d5db">{price_s}</div>
+    <div class="{day_cls}" style="font-size:0.73rem">{day_s}</div>
+  </td>
+  <td class="{eps_cls}" style="text-align:right;font-family:'JetBrains Mono',monospace;font-size:0.86rem;white-space:nowrap">{eps_s}</td>
+  {pe_cell}
+  <td class="{w52_cls}" style="text-align:right;font-family:'JetBrains Mono',monospace;font-size:0.86rem;white-space:nowrap">{w52_s}</td>
+  {ma_cell}
+  <td style="padding-right:18px">{sc_bar}</td>
 </tr>""")
+
+    # Build header
+    pe_hdr = "" if is_hr else '<th style="text-align:right">Fwd P/E</th>'
+    ma_hdr = "" if is_hr else '<th style="text-align:right">vs 200MA</th>'
 
     return f"""
 <table class="screener-table">
 <thead>
 <tr>
-  <th style="width:36px">#</th>
-  <th>Ticker</th>
-  <th>Theme</th>
-  <th style="text-align:center">Score</th>
-  <th style="text-align:right">Fwd P/E</th>
-  <th style="text-align:right">Rev Growth</th>
-  <th style="text-align:right">EBITDA Mgn</th>
-  <th style="text-align:right">RSI</th>
-  <th style="text-align:right">vs 200MA</th>
+  <th style="width:28px">#</th>
+  <th>Stock</th>
+  <th>Mkt Cap</th>
+  <th>Price</th>
+  <th style="text-align:right">EPS Grw</th>
+  {pe_hdr}
+  <th style="text-align:right">52-week</th>
+  {ma_hdr}
+  <th>Score</th>
 </tr>
 </thead>
-<tbody>{"".join(rows)}</tbody>
+<tbody>{"".join(html_rows)}</tbody>
 </table>"""

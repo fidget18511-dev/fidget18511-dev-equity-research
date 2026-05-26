@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 from analyst import stream_report, stream_screener_insights
 from data import fetch_snapshot
-from screener import UNIVERSE, render_table, screen_universe
+from screener import render_table, run_screen
 
 load_dotenv(override=True)
 
@@ -152,57 +152,86 @@ h2 { font-size: 1.35rem; margin-top: 0; }
 .screener-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.9rem;
+    font-size: 0.88rem;
 }
 .screener-table th {
     color: #6b7280;
-    font-size: 0.70rem;
+    font-size: 0.68rem;
     letter-spacing: 0.09em;
     text-transform: uppercase;
     font-weight: 500;
-    padding: 8px 14px;
+    padding: 9px 14px;
     border-bottom: 1px solid #1f242e;
     text-align: left;
     white-space: nowrap;
+    background: #0b0e13;
+    position: sticky;
+    top: 0;
 }
 .screener-table td {
-    padding: 10px 14px;
-    border-bottom: 1px solid #0f1218;
+    padding: 9px 14px;
+    border-bottom: 1px solid #0d1017;
     vertical-align: middle;
 }
-.screener-table tbody tr:hover td { background: #151921; }
+.screener-table tbody tr:hover td { background: rgba(255,255,255,0.025); }
 
 .cell-green { color: #00d68f; }
 .cell-amber { color: #f59e0b; }
 .cell-red   { color: #ef4444; }
-.cell-dim   { color: #4b5563; }
+.cell-dim   { color: #374151; }
 
 /* ── Pick cards ── */
 .pick-card {
-    background: linear-gradient(180deg, #151921 0%, #11141a 100%);
+    background: #0f1218;
     border: 1px solid #1f242e;
-    border-radius: 10px;
+    border-radius: 12px;
     padding: 18px 20px;
     height: 100%;
-    transition: border-color 0.15s;
+    transition: border-color 0.2s, background 0.2s;
 }
-.pick-card:hover { border-color: #2a3142; }
-.pick-medal { color: #6b7280; font-size: 0.70rem; letter-spacing: 0.10em; text-transform: uppercase; margin-bottom: 4px; }
-.pick-ticker { font-family: 'JetBrains Mono', monospace; font-size: 1.9rem; font-weight: 700; color: #f4f5f7; line-height: 1.1; }
-.pick-label { color: #9ca3af; font-size: 0.85rem; margin-top: 2px; margin-bottom: 10px; }
-.pick-score {
+.pick-card:hover { border-color: #2d3748; background: #111520; }
+.pick-rank-badge {
     display: inline-block;
-    background: rgba(0,214,143,0.12);
-    color: #00d68f;
-    font-size: 0.78rem;
+    font-size: 0.68rem;
     font-weight: 600;
-    padding: 2px 10px;
-    border-radius: 4px;
-    margin-bottom: 12px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    padding: 2px 9px;
+    border-radius: 20px;
+    margin-bottom: 10px;
 }
-.pick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.pick-stat-label { color: #6b7280; font-size: 0.75rem; }
-.pick-stat-val { color: #e8eaed; font-family: 'JetBrains Mono', monospace; font-size: 0.88rem; font-weight: 500; }
+.pick-ticker { font-family: 'JetBrains Mono', monospace; font-size: 2rem; font-weight: 700; color: #f4f5f7; line-height: 1.1; }
+.pick-name { color: #6b7280; font-size: 0.8rem; margin-top: 2px; margin-bottom: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pick-score-line { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.pick-score-bar-bg { flex: 1; height: 4px; background: #1f242e; border-radius: 3px; }
+.pick-score-bar-fill { height: 4px; border-radius: 3px; }
+.pick-score-num { font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; font-weight: 700; }
+.pick-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pick-stat { }
+.pick-stat-label { color: #4b5563; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.pick-stat-val { color: #d1d5db; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; font-weight: 500; margin-top: 1px; }
+
+/* ── Section divider ── */
+.scr-section {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin: 28px 0 18px;
+}
+.scr-section-icon { font-size: 1.3rem; line-height: 1; }
+.scr-section-label { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; }
+.scr-section-title { font-size: 1.1rem; font-weight: 700; color: #f4f5f7; margin-top: 1px; }
+.scr-section-line { flex: 1; height: 1px; background: #1f242e; }
+
+/* ── Table wrapper (scrollable) ── */
+.scr-table-wrap {
+    background: #0b0e13;
+    border: 1px solid #1f242e;
+    border-radius: 10px;
+    overflow: hidden;
+    max-height: 560px;
+    overflow-y: auto;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -359,99 +388,138 @@ with tab_res:
 # ════════════════════════════════════════════════════════════════════════════════
 # TAB 2 — SCREENER
 # ════════════════════════════════════════════════════════════════════════════════
+# TAB 2 — SCREENER
+# ════════════════════════════════════════════════════════════════════════════════
 with tab_scr:
-    # ── Header ────────────────────────────────────────────────────────────────
-    head_l, head_r = st.columns([5, 1])
-    with head_l:
-        st.markdown("## Stock Screener")
+
+    # ── Header row ────────────────────────────────────────────────────────────
+    hd_l, hd_r = st.columns([5, 1])
+    with hd_l:
+        st.markdown("## Market Screener")
         st.markdown(
             "<div style='color:#6b7280;margin-top:-0.4rem;font-size:0.92rem'>"
-            f"Screens {len(UNIVERSE)} quality names across AI, tech, healthcare, and financials. "
-            "Ranked by composite score: quality · momentum · value."
+            "Live market-wide screen · two buckets: high risk/reward and safe high-potential."
             "</div>",
             unsafe_allow_html=True,
         )
-    with head_r:
-        run_screen = st.button("Run Screen", type="primary", use_container_width=True, key="run_screen")
+    with hd_r:
+        btn_run = st.button("Run Screen", type="primary", use_container_width=True, key="run_screen")
 
-    # ── Run fetch ─────────────────────────────────────────────────────────────
-    if run_screen:
-        prog = st.progress(0.0, text="Starting…")
+    # ── Run the screen ────────────────────────────────────────────────────────
+    if btn_run:
+        prog = st.progress(0.0, text="Pulling screener data…")
 
-        def _cb(pct: float) -> None:
-            prog.progress(pct, text=f"Fetching universe… {int(pct * 100)}%")
+        def _scr_cb(pct: float) -> None:
+            prog.progress(pct, text=f"Fetching… {int(pct * 100)}%")
 
-        screen_results = screen_universe(progress_cb=_cb)
+        hr, sf = run_screen(progress_cb=_scr_cb)
         prog.empty()
-        st.session_state.screen_results = screen_results
-        st.session_state.screen_insights = None   # reset on new screen
+        st.session_state.scr_hr       = hr
+        st.session_state.scr_sf       = sf
+        st.session_state.scr_insights = None
 
-    # ── Display results ───────────────────────────────────────────────────────
-    if "screen_results" not in st.session_state or not st.session_state.screen_results:
-        st.markdown("")
-        st.info(
-            f"Click **Run Screen** to fetch live data for all {len(UNIVERSE)} stocks "
-            "and rank them by composite score. Takes ~15–25 seconds.",
-            icon="📡",
-        )
+    hr: list = st.session_state.get("scr_hr", [])
+    sf: list = st.session_state.get("scr_sf", [])
+
+    # ── Empty state ───────────────────────────────────────────────────────────
+    if not hr and not sf:
+        st.markdown("""
+<div style="margin:3rem auto;max-width:540px;text-align:center">
+  <div style="font-size:2.5rem;margin-bottom:1rem">📡</div>
+  <div style="color:#f4f5f7;font-size:1.1rem;font-weight:600;margin-bottom:0.5rem">Hit Run Screen to start</div>
+  <div style="color:#6b7280;font-size:0.9rem">
+    Queries Yahoo Finance's live market screener across hundreds of US stocks.<br>
+    Results split into <strong style="color:#f97316">High Risk / High Reward</strong>
+    and <strong style="color:#00d68f">Safe &amp; Solid</strong> buckets.<br>
+    Takes ~5 seconds.
+  </div>
+</div>""", unsafe_allow_html=True)
+
     else:
-        results = st.session_state.screen_results
-        ok_results = [r for r in results if not r.error]
+        # ── Helper: render pick cards for top N from a list ───────────────────
+        def _pick_cards(rows: list, accent: str, n: int = 3) -> None:
+            top = rows[:n]
+            cols = st.columns(n)
+            ranks = ["#1", "#2", "#3"]
+            for col, r, rank in zip(cols, top, ranks):
+                pe_s  = f"{r.pe_forward:.1f}×"          if r.pe_forward      is not None else "—"
+                rg_s  = f"{r.revenue_growth*100:+.1f}%"  if r.revenue_growth  is not None else "—"
+                eg_s  = f"{r.earnings_growth*100:+.1f}%" if r.earnings_growth is not None else "—"
+                w52_s = f"{r.week52_chg*100:+.1f}%"      if r.week52_chg      is not None else "—"
+                bar_w = min(100, max(0, r.score))
+                name_s = r.name[:34] + "…" if len(r.name) > 34 else r.name
 
-        # ── Top 3 pick cards ──────────────────────────────────────────────────
-        st.markdown("")
-        st.markdown('<div class="section-label">Top Picks</div>', unsafe_allow_html=True)
-
-        top3 = ok_results[:3]
-        medals = ["🥇 #1 Pick", "🥈 #2 Pick", "🥉 #3 Pick"]
-
-        pick_cols = st.columns(3)
-        for col, r, medal in zip(pick_cols, top3, medals):
-            s = r.snap
-            pe_str  = f"{s.pe_forward:.1f}×"   if s.pe_forward            is not None else "—"
-            rg_str  = f"{s.revenue_growth_yoy*100:+.1f}%" if s.revenue_growth_yoy is not None else "—"
-            rsi_str = f"{s.rsi_14:.1f}"          if s.rsi_14               is not None else "—"
-            ma_str  = f"{s.vs_ma_200_pct:+.1f}%" if s.vs_ma_200_pct        is not None else "—"
-
-            with col:
-                st.markdown(
-                    f"""
+                with col:
+                    st.markdown(f"""
 <div class="pick-card">
-  <div class="pick-medal">{medal}</div>
-  <div class="pick-ticker">{r.ticker}</div>
-  <div class="pick-label">{r.label}</div>
-  <div class="pick-score">{r.score:.0f} / 100</div>
-  <div class="pick-grid">
-    <div>
-      <div class="pick-stat-label">Fwd P/E</div>
-      <div class="pick-stat-val">{pe_str}</div>
+  <div>
+    <span class="pick-rank-badge" style="background:rgba(255,255,255,0.06);color:{accent}">{rank} Pick</span>
+  </div>
+  <div class="pick-ticker">{r.symbol}</div>
+  <div class="pick-name">{name_s}</div>
+  <div class="pick-score-line">
+    <div class="pick-score-bar-bg">
+      <div class="pick-score-bar-fill" style="width:{bar_w:.0f}%;background:{accent}"></div>
     </div>
-    <div>
+    <span class="pick-score-num" style="color:{accent}">{r.score:.0f}</span>
+  </div>
+  <div class="pick-stats">
+    <div class="pick-stat">
       <div class="pick-stat-label">Rev Growth</div>
-      <div class="pick-stat-val">{rg_str}</div>
+      <div class="pick-stat-val">{rg_s}</div>
     </div>
-    <div>
-      <div class="pick-stat-label">RSI</div>
-      <div class="pick-stat-val">{rsi_str}</div>
+    <div class="pick-stat">
+      <div class="pick-stat-label">EPS Growth</div>
+      <div class="pick-stat-val">{eg_s}</div>
     </div>
-    <div>
-      <div class="pick-stat-label">vs 200MA</div>
-      <div class="pick-stat-val">{ma_str}</div>
+    <div class="pick-stat">
+      <div class="pick-stat-label">Fwd P/E</div>
+      <div class="pick-stat-val">{pe_s}</div>
+    </div>
+    <div class="pick-stat">
+      <div class="pick-stat-label">52-week</div>
+      <div class="pick-stat-val">{w52_s}</div>
     </div>
   </div>
-</div>""",
-                    unsafe_allow_html=True,
-                )
+</div>""", unsafe_allow_html=True)
 
-        # ── Full table ────────────────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown('<div class="section-label">Full Rankings</div>', unsafe_allow_html=True)
-        st.markdown(render_table(results), unsafe_allow_html=True)
+        # ── HIGH RISK / HIGH REWARD ───────────────────────────────────────────
+        if hr:
+            st.markdown("""
+<div class="scr-section">
+  <div class="scr-section-icon">⚡</div>
+  <div>
+    <div class="scr-section-label" style="color:#f97316">High Risk</div>
+    <div class="scr-section-title">High Reward</div>
+  </div>
+  <div class="scr-section-line"></div>
+  <div style="color:#6b7280;font-size:0.8rem;white-space:nowrap">small &amp; mid cap · growth momentum</div>
+</div>""", unsafe_allow_html=True)
 
-        # Show failed tickers (if any)
-        failed = [r.ticker for r in results if r.error]
-        if failed:
-            st.caption(f"⚠️ Could not fetch: {', '.join(failed)}")
+            _pick_cards(hr, accent="#f97316")
+            st.markdown(
+                '<div class="scr-table-wrap">' + render_table(hr, accent="#f97316") + "</div>",
+                unsafe_allow_html=True,
+            )
+
+        # ── SAFE & SOLID ──────────────────────────────────────────────────────
+        if sf:
+            st.markdown("""
+<div class="scr-section">
+  <div class="scr-section-icon">🛡️</div>
+  <div>
+    <div class="scr-section-label" style="color:#00d68f">Safe &amp; Solid</div>
+    <div class="scr-section-title">High Potential</div>
+  </div>
+  <div class="scr-section-line"></div>
+  <div style="color:#6b7280;font-size:0.8rem;white-space:nowrap">large cap · quality + value</div>
+</div>""", unsafe_allow_html=True)
+
+            _pick_cards(sf, accent="#00d68f")
+            st.markdown(
+                '<div class="scr-table-wrap">' + render_table(sf, accent="#00d68f") + "</div>",
+                unsafe_allow_html=True,
+            )
 
         # ── AI Insights ───────────────────────────────────────────────────────
         st.markdown("---")
@@ -459,20 +527,25 @@ with tab_scr:
 
         if st.button("✨ Generate AI Insights", type="primary", key="gen_insights"):
             st.markdown('<div class="report-container">', unsafe_allow_html=True)
-            insights_box = st.empty()
-            chunks_sc: list[str] = []
+            ins_box    = st.empty()
+            ins_chunks: list[str] = []
             try:
-                for chunk in stream_screener_insights(ok_results):
-                    chunks_sc.append(chunk)
-                    insights_box.markdown("".join(chunks_sc))
+                for chunk in stream_screener_insights(hr, sf):
+                    ins_chunks.append(chunk)
+                    ins_box.markdown("".join(ins_chunks))
             except Exception as e:
                 st.error(f"Claude API error: {e}")
-            st.session_state.screen_insights = "".join(chunks_sc)
+            st.session_state.scr_insights = "".join(ins_chunks)
             st.markdown("</div>", unsafe_allow_html=True)
 
-        elif st.session_state.get("screen_insights"):
+        elif st.session_state.get("scr_insights"):
             st.markdown('<div class="report-container">', unsafe_allow_html=True)
-            st.markdown(st.session_state.screen_insights)
+            st.markdown(st.session_state.scr_insights)
             st.markdown("</div>", unsafe_allow_html=True)
         else:
-            st.caption("Click above to get Claude's take on the best opportunities in this screen.")
+            st.markdown(
+                "<div style='color:#4b5563;font-size:0.85rem;margin-top:0.5rem'>"
+                "Run the screen first, then click above to get Claude's top picks from both lists."
+                "</div>",
+                unsafe_allow_html=True,
+            )

@@ -61,57 +61,66 @@ Trend (above/below 50d & 200d MA), momentum (RSI), key levels (52-week range). E
 Keep it tight. No fluff."""
 
 
-SCREENER_PROMPT = """You are an investment research analyst reviewing a stock screen.
-You will be given the top results from a composite score screen (quality + momentum + value).
+SCREENER_PROMPT = """You are an investment research analyst reviewing two market screens.
+
+You will see two ranked tables:
+  A) HIGH RISK / HIGH REWARD — small-to-mid cap growth names ranked by revenue & earnings growth
+  B) SAFE & SOLID            — large cap quality ranked by value + steady growth
 
 Your task:
-1. Pick the 3 most compelling opportunities — be specific about what makes each interesting RIGHT NOW
-2. Name a single Best Idea with a clear conviction call
-3. Flag any names to AVOID and why (max 2)
+1. Pick your 2 best ideas from each category (4 total) — be specific about the set-up NOW
+2. Name one single Best Idea across both lists with a conviction call
+3. In each pick: ticker + one-line thesis + 2 sentences (why now, key risk)
 
 OUTPUT FORMAT:
 
-## Top 3 Opportunities
-### 1. [TICKER] — [one-line thesis]
-[2–3 sentences: what's the set-up, why now, key risk]
+## ⚡ High Risk Picks
+### [TICKER] — [one-line thesis]
+[2 sentences]
 
-### 2. [TICKER] — [one-line thesis]
-[2–3 sentences]
+### [TICKER] — [one-line thesis]
+[2 sentences]
 
-### 3. [TICKER] — [one-line thesis]
-[2–3 sentences]
+## 🛡️ Safe Picks
+### [TICKER] — [one-line thesis]
+[2 sentences]
 
-## Best Idea: [TICKER]
-**Conviction: High / Medium / Low**
-[2 sentences of conviction]
+### [TICKER] — [one-line thesis]
+[2 sentences]
 
-## Avoid
-- **[TICKER]**: [reason in one sentence]
+## 🏆 Best Idea: [TICKER]
+**Conviction: High / Medium / Low** | **Category: High Risk / Safe**
+[2 sentences of conviction — why this beats everything else on both lists]
 
-Be direct. No hedging. Reference the actual figures."""
+Be direct. Reference the actual numbers. No boilerplate."""
 
 
-def stream_screener_insights(results: list) -> Iterator[str]:
-    """Stream Claude's top-picks commentary from screener results."""
-    lines = [
-        "Rank | Ticker | Theme | Score | Fwd P/E | Rev Growth | EBITDA Margin | RSI | vs 200MA",
+def stream_screener_insights(high_risk: list, safe: list) -> Iterator[str]:
+    """Stream Claude's top-picks commentary from the two screener buckets."""
+    def _row(rank: int, r) -> str:
+        pe  = f"{r.pe_forward:.1f}×"         if r.pe_forward   is not None else "n/a"
+        eg  = f"{r.eps_growth*100:+.1f}%"    if r.eps_growth   is not None else "n/a"
+        w52 = f"{r.week52_chg*100:+.1f}%"    if r.week52_chg   is not None else "n/a"
+        ma  = f"{r.vs_ma200*100:+.1f}%"      if r.vs_ma200     is not None else "n/a"
+        mc  = f"${r.market_cap/1e9:.1f}B"    if r.market_cap   is not None else "n/a"
+        return f"{rank} | {r.symbol} | {r.name[:28]} | {mc} | {eg} | {pe} | {w52} | {ma} | {r.score:.0f}"
+
+    hr_lines = [
+        "Rank | Ticker | Name | Mkt Cap | EPS Growth | Fwd P/E | 52w | vs200MA | Score",
         "---|---|---|---|---|---|---|---|---",
-    ]
-    for rank, r in enumerate(results[:12], 1):
-        if r.error:
-            continue
-        s = r.snap
-        pe  = f"{s.pe_forward:.1f}×" if s.pe_forward else "n/a"
-        rg  = f"{s.revenue_growth_yoy*100:+.1f}%" if s.revenue_growth_yoy is not None else "n/a"
-        em  = f"{s.ebitda_margin*100:.1f}%" if s.ebitda_margin is not None else "n/a"
-        rsi = f"{s.rsi_14:.1f}" if s.rsi_14 is not None else "n/a"
-        ma  = f"{s.vs_ma_200_pct:+.1f}%" if s.vs_ma_200_pct is not None else "n/a"
-        lines.append(f"{rank} | {r.ticker} | {r.label} | {r.score:.0f} | {pe} | {rg} | {em} | {rsi} | {ma}")
+    ] + [_row(i+1, r) for i, r in enumerate(high_risk[:15])]
+
+    sf_lines = [
+        "Rank | Ticker | Name | Mkt Cap | EPS Growth | Fwd P/E | 52w | vs200MA | Score",
+        "---|---|---|---|---|---|---|---|---",
+    ] + [_row(i+1, r) for i, r in enumerate(safe[:15])]
 
     user_msg = (
-        "Here are the screener results (ranked by composite score):\n\n"
-        + "\n".join(lines)
-        + "\n\nGive me your top picks."
+        "**HIGH RISK / HIGH REWARD screen (top 15):**\n"
+        + "\n".join(hr_lines)
+        + "\n\n**SAFE & SOLID screen (top 15):**\n"
+        + "\n".join(sf_lines)
+        + "\n\nGive me your top picks from both lists."
     )
 
     client = Anthropic(api_key=_api_key() or None)

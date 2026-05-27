@@ -412,32 +412,36 @@ with tab_scr:
         def _scr_cb(pct: float) -> None:
             prog.progress(pct, text=f"Fetching… {int(pct * 100)}%")
 
-        hr, sf = run_screen(progress_cb=_scr_cb)
+        hr, sf, dip = run_screen(progress_cb=_scr_cb)
         prog.empty()
         st.session_state.scr_hr       = hr
         st.session_state.scr_sf       = sf
+        st.session_state.scr_dip      = dip
         st.session_state.scr_insights = None
 
-    hr: list = st.session_state.get("scr_hr", [])
-    sf: list = st.session_state.get("scr_sf", [])
+    hr:  list = st.session_state.get("scr_hr",  [])
+    sf:  list = st.session_state.get("scr_sf",  [])
+    dip: list = st.session_state.get("scr_dip", [])
 
     # ── Empty state ───────────────────────────────────────────────────────────
-    if not hr and not sf:
+    if not hr and not sf and not dip:
         st.markdown("""
-<div style="margin:3rem auto;max-width:540px;text-align:center">
+<div style="margin:3rem auto;max-width:580px;text-align:center">
   <div style="font-size:2.5rem;margin-bottom:1rem">📡</div>
   <div style="color:#f4f5f7;font-size:1.1rem;font-weight:600;margin-bottom:0.5rem">Hit Run Screen to start</div>
   <div style="color:#6b7280;font-size:0.9rem">
     Queries Yahoo Finance's live market screener across hundreds of US stocks.<br>
-    Results split into <strong style="color:#f97316">High Risk / High Reward</strong>
-    and <strong style="color:#00d68f">Safe &amp; Solid</strong> buckets.<br>
+    Results split into three buckets:
+    <strong style="color:#f97316">High Risk / High Reward</strong>,
+    <strong style="color:#00d68f">Safe &amp; Solid</strong>, and
+    <strong style="color:#38bdf8">Today's Dips</strong>.<br>
     Takes ~5 seconds.
   </div>
 </div>""", unsafe_allow_html=True)
 
     else:
         # ── Helper: render pick cards for top N from a list ───────────────────
-        def _pick_cards(rows: list, accent: str, n: int = 3) -> None:
+        def _pick_cards(rows: list, accent: str, n: int = 3, is_dip: bool = False) -> None:
             top = rows[:n]
             cols = st.columns(n)
             ranks = ["#1", "#2", "#3"]
@@ -446,8 +450,21 @@ with tab_scr:
                 rg_s  = f"{r.eps_growth*100:+.1f}%"   if r.eps_growth  is not None else "—"
                 eg_s  = f"{r.vs_ma200*100:+.1f}%"     if r.vs_ma200    is not None else "—"
                 w52_s = f"{r.week52_chg*100:+.1f}%"   if r.week52_chg  is not None else "—"
+                dy_s  = f"{r.day_chg*100:+.1f}%"      if r.day_chg     is not None else "—"
                 bar_w = min(100, max(0, r.score))
                 name_s = r.name[:34] + "…" if len(r.name) > 34 else r.name
+
+                # Dip cards: lead with today's drop (red), swap P/E for EPS growth
+                if is_dip:
+                    stat1_label = "Today's Drop"
+                    stat1_val   = f'<div class="pick-stat-val" style="color:#ef4444;font-weight:700">{dy_s}</div>'
+                    stat3_label = "EPS Growth"
+                    stat3_val   = f'<div class="pick-stat-val">{rg_s}</div>'
+                else:
+                    stat1_label = "EPS Growth"
+                    stat1_val   = f'<div class="pick-stat-val">{rg_s}</div>'
+                    stat3_label = "Fwd P/E"
+                    stat3_val   = f'<div class="pick-stat-val">{pe_s}</div>'
 
                 with col:
                     st.markdown(f"""
@@ -465,16 +482,16 @@ with tab_scr:
   </div>
   <div class="pick-stats">
     <div class="pick-stat">
-      <div class="pick-stat-label">EPS Growth</div>
-      <div class="pick-stat-val">{rg_s}</div>
+      <div class="pick-stat-label">{stat1_label}</div>
+      {stat1_val}
     </div>
     <div class="pick-stat">
       <div class="pick-stat-label">vs 200MA</div>
       <div class="pick-stat-val">{eg_s}</div>
     </div>
     <div class="pick-stat">
-      <div class="pick-stat-label">Fwd P/E</div>
-      <div class="pick-stat-val">{pe_s}</div>
+      <div class="pick-stat-label">{stat3_label}</div>
+      {stat3_val}
     </div>
     <div class="pick-stat">
       <div class="pick-stat-label">52-week</div>
@@ -521,6 +538,25 @@ with tab_scr:
                 unsafe_allow_html=True,
             )
 
+        # ── DIP OPPORTUNITY ───────────────────────────────────────────────────
+        if dip:
+            st.markdown("""
+<div class="scr-section">
+  <div class="scr-section-icon">🎯</div>
+  <div>
+    <div class="scr-section-label" style="color:#38bdf8">Dip Opportunity</div>
+    <div class="scr-section-title">Buy the Dip</div>
+  </div>
+  <div class="scr-section-line"></div>
+  <div style="color:#6b7280;font-size:0.8rem;white-space:nowrap">quality stocks down today · trend still intact</div>
+</div>""", unsafe_allow_html=True)
+
+            _pick_cards(dip, accent="#38bdf8", is_dip=True)
+            st.markdown(
+                '<div class="scr-table-wrap">' + render_table(dip, accent="#38bdf8") + "</div>",
+                unsafe_allow_html=True,
+            )
+
         # ── AI Insights ───────────────────────────────────────────────────────
         st.markdown("---")
         st.markdown('<div class="section-label">AI Insights</div>', unsafe_allow_html=True)
@@ -530,7 +566,7 @@ with tab_scr:
             ins_box    = st.empty()
             ins_chunks: list[str] = []
             try:
-                for chunk in stream_screener_insights(hr, sf):
+                for chunk in stream_screener_insights(hr, sf, dip):
                     ins_chunks.append(chunk)
                     ins_box.markdown("".join(ins_chunks))
             except Exception as e:
@@ -545,7 +581,7 @@ with tab_scr:
         else:
             st.markdown(
                 "<div style='color:#4b5563;font-size:0.85rem;margin-top:0.5rem'>"
-                "Run the screen first, then click above to get Claude's top picks from both lists."
+                "Run the screen first, then click above to get Claude's top picks and dip analysis."
                 "</div>",
                 unsafe_allow_html=True,
             )

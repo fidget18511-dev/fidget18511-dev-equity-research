@@ -1,7 +1,8 @@
-"""Market screener — Yahoo Finance predefined screeners, two buckets.
+"""Market screener — Yahoo Finance predefined screeners, three buckets.
 
 HIGH RISK / HIGH REWARD  — small/mid cap growth names with sustainable momentum
 SAFE & SOLID             — large cap quality at reasonable valuation
+DIP OPPORTUNITY          — quality stocks down today, trend intact — genuine buy-the-dip candidates
 
 Scoring philosophy:
   - Bell-curve functions reward stocks in the OPTIMAL range; extremes score lower
@@ -35,7 +36,7 @@ _TIMEOUT = 18
 class QuoteRow:
     symbol:       str
     name:         str
-    category:     str               # "high_risk" | "safe"
+    category:     str               # "high_risk" | "safe" | "dip"
     market_cap:   Optional[float]   = None
     price:        Optional[float]   = None
     day_chg:      Optional[float]   = None   # fraction  (+0.05 = +5%)
@@ -221,15 +222,76 @@ def _score_safe(r: QuoteRow) -> float:
     return round(min(100.0, max(0.0, s)), 1)
 
 
+def _score_dip(r: QuoteRow) -> float:
+    """
+    Dip Opportunity scoring (0–100).
+
+    Target: quality stocks having a bad day inside an otherwise healthy uptrend.
+    The goal is to separate 'the market overreacted' from 'this thing is actually broken'.
+
+    Rewards:
+      - Clean pullback (−1% to −5%) — enough to be a real dip, not a crash
+      - Stock still above 200d MA (uptrend intact; today is a re-entry)
+      - Positive 52w return (this is a dip IN a bull run, not a continued decline)
+      - Strong EPS growth — fundamentals support buying weakness
+
+    Penalises:
+      - Day drops > 12% (news-driven or real problem — not a dip, don't knife-catch)
+      - Below 200MA (trend already broken)
+      - Negative 52w return (this stock has been declining, not dipping)
+      - Shrinking earnings
+    """
+    if r.day_chg is None or r.day_chg >= 0:
+        return 0.0
+
+    s = 0.0
+
+    # ── Dip quality (0–25 pts): sweet spot −1.5% to −5% ─────────────────────
+    dip = r.day_chg   # negative fraction, e.g. −0.025
+    if -0.12 <= dip < -0.005:
+        # Bell curve peaks at −2.5% drop; very shallow or crash-level drops score low
+        pts = 25.0 * _bell(dip, optimal=-0.025, width=0.028)
+        s += max(0.0, pts)
+
+    # ── EPS growth (0–30 pts): fundamentals must justify buying the dip ──────
+    if r.eps_growth is not None:
+        if r.eps_growth > 0:
+            s += min(30.0, math.sqrt(r.eps_growth) * 20.0)
+        elif r.eps_growth < -0.20:
+            s -= 10.0   # earnings declining = deterioration, not a dip
+
+    # ── Trend health via 200MA (0–25 pts): above MA = dip in uptrend ─────────
+    if r.vs_ma200 is not None:
+        if 0.0 <= r.vs_ma200 <= 0.25:
+            s += 25.0   # healthy 0–25% above: trend intact
+        elif 0.25 < r.vs_ma200 <= 0.45:
+            s += 18.0   # extended but still trending up
+        elif -0.05 <= r.vs_ma200 < 0.0:
+            s += 12.0   # just below MA — borderline
+        elif -0.15 <= r.vs_ma200 < -0.05:
+            s += 5.0    # weakening trend
+        # < −15% below MA → 0 (broken trend, not a dip)
+
+    # ── 52w return (0–20 pts): must be positive — dip IN a bull run ──────────
+    if r.week52_chg is not None and r.week52_chg > 0:
+        # Bell curve peak at +35% annual gain (healthy momentum, not exhausted)
+        pts = 20.0 * _bell(r.week52_chg, optimal=0.35, width=0.45)
+        s += max(0.0, pts)
+    # Negative 52w → 0 bonus: declining stocks aren't dip opportunities
+
+    return round(min(100.0, max(0.0, s)), 1)
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
-def run_screen(progress_cb=None) -> tuple[list[QuoteRow], list[QuoteRow]]:
-    """Fetch and return (high_risk_rows, safe_rows), sorted by score desc."""
+def run_screen(progress_cb=None) -> tuple[list[QuoteRow], list[QuoteRow], list[QuoteRow]]:
+    """Fetch and return (high_risk_rows, safe_rows, dip_rows), sorted by score desc."""
     tasks = {
         "hr1": ("aggressive_small_caps",    100, "high_risk"),
         "hr2": ("growth_technology_stocks",  60, "high_risk"),
         "sf1": ("undervalued_large_caps",   100, "safe"),
         "sf2": ("undervalued_growth_stocks", 60, "safe"),
+        "dp1": ("day_losers",               100, "dip"),
     }
     raw: dict[str, list[dict]] = {}
     done = 0
@@ -237,7 +299,7 @@ def run_screen(progress_cb=None) -> tuple[list[QuoteRow], list[QuoteRow]]:
     def _fetch(key, scr_id, count, _cat):
         return key, _get_predefined(scr_id, count)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
         futures = {pool.submit(_fetch, k, sid, cnt, cat): k
                    for k, (sid, cnt, cat) in tasks.items()}
         for fut in concurrent.futures.as_completed(futures):
@@ -260,14 +322,21 @@ def run_screen(progress_cb=None) -> tuple[list[QuoteRow], list[QuoteRow]]:
 
     hr_rows   = _merge(["hr1", "hr2"], "high_risk")
     safe_rows = _merge(["sf1", "sf2"], "safe")
+    dip_rows  = _merge(["dp1"],        "dip")
+
+    # Filter dip: must be down at least 0.5% today, and not a full crash (>12%)
+    dip_rows = [r for r in dip_rows
+                if r.day_chg is not None and -0.12 <= r.day_chg < -0.005]
 
     for r in hr_rows:   r.score = _score_hr(r)
     for r in safe_rows: r.score = _score_safe(r)
+    for r in dip_rows:  r.score = _score_dip(r)
 
     hr_rows.sort(  key=lambda x: x.score, reverse=True)
     safe_rows.sort(key=lambda x: x.score, reverse=True)
+    dip_rows.sort( key=lambda x: x.score, reverse=True)
 
-    return hr_rows, safe_rows
+    return hr_rows, safe_rows, dip_rows
 
 
 # ── Formatting helpers ─────────────────────────────────────────────────────────

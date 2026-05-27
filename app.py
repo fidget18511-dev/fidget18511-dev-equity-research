@@ -410,10 +410,19 @@ with tab_scr:
         prog = st.progress(0.0, text="Pulling screener data…")
 
         def _scr_cb(pct: float) -> None:
-            prog.progress(pct, text=f"Fetching… {int(pct * 100)}%")
+            prog.progress(min(0.99, float(pct)), text=f"Fetching… {int(pct * 100)}%")
 
-        hr, sf, dip = run_screen(progress_cb=_scr_cb)
-        prog.empty()
+        try:
+            result = run_screen(progress_cb=_scr_cb)
+            hr  = result[0] if len(result) > 0 else []
+            sf  = result[1] if len(result) > 1 else []
+            dip = result[2] if len(result) > 2 else []
+        except Exception as _scr_err:
+            prog.empty()
+            st.error(f"Screener error: {_scr_err}")
+            hr, sf, dip = [], [], []
+        else:
+            prog.empty()
         st.session_state.scr_hr       = hr
         st.session_state.scr_sf       = sf
         st.session_state.scr_dip      = dip

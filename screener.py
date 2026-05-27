@@ -293,7 +293,7 @@ def run_screen(progress_cb=None) -> tuple[list[QuoteRow], list[QuoteRow], list[Q
         "sf2": ("undervalued_growth_stocks", 60, "safe"),
         "dp1": ("day_losers",               100, "dip"),
     }
-    raw: dict[str, list[dict]] = {}
+    raw = {}
     done = 0
 
     def _fetch(key, scr_id, count, _cat):
@@ -310,8 +310,8 @@ def run_screen(progress_cb=None) -> tuple[list[QuoteRow], list[QuoteRow], list[Q
                 progress_cb(done / len(tasks))
 
     def _merge(keys, category):
-        seen: set[str] = set()
-        rows: list[QuoteRow] = []
+        seen = set()
+        rows = []
         for k in keys:
             for q in raw.get(k, []):
                 sym = q.get("symbol", "")

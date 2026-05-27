@@ -111,7 +111,7 @@ Your output:
 Be ruthless. The user can handle the truth."""
 
 
-def stream_screener_insights(high_risk: list, safe: list, dips: list | None = None) -> Iterator[str]:
+def stream_screener_insights(high_risk: list, safe: list, dips=None) -> Iterator[str]:
     """Stream Claude's top-picks commentary from all screener buckets."""
     def _row(rank: int, r) -> str:
         pe  = f"{r.pe_forward:.1f}×"         if r.pe_forward   is not None else "n/a"
